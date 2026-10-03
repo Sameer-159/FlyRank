@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refresh / Content Opportunity Scoring — FlyRank Capstone</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; max-width: 820px; margin: 0 auto; padding: 50px 24px 80px; line-height: 1.7; color: #222; }
+  h1 { font-size: 2em; margin-bottom: 0.1em; }
+  .subtitle { color: #555; font-size: 1.05em; margin-top: 0; }
+  h2 { border-bottom: 2px solid #ddd; padding-bottom: 6px; margin-top: 2.6em; }
+  h3 { margin-top: 1.6em; }
+  .abstract { background: #f7f7f5; border-left: 4px solid #888; padding: 18px 22px; font-style: italic; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-family: Georgia, serif; }
+  th, td { border: 1px solid #ccc; padding: 9px 12px; text-align: left; }
+  th { background: #f2f2f0; }
+  img { max-width: 100%; border: 1px solid #ddd; margin: 10px 0; display: block; }
+  code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 0.92em; }
+  footer { margin-top: 4em; font-size: 0.85em; color: #666; border-top: 1px solid #ddd; padding-top: 1em; }
+  .toc { background: #fafafa; border: 1px solid #e0e0e0; padding: 16px 24px; }
+  .toc a { text-decoration: none; color: #1a4d8f; margin-right: 6px; }
+  blockquote { border-left: 3px solid #bbb; margin-left: 0; padding-left: 16px; color: #444; }
+  .figure-caption { font-size: 0.9em; color: #555; margin-top: -6px; }
+</style>
+</head>
+<body>
+
+<h1>Refresh / Content Opportunity Scoring</h1>
+<p class="subtitle">A ranked, explainable action engine for deciding which content to protect, rewrite, monitor, or review — built on the FlyRank ML Internship dataset.</p>
+
+<nav class="toc">
+  <strong>Contents</strong><br>
+  <a href="#abstract">Abstract</a> ·
+  <a href="#intro">Introduction</a> ·
+  <a href="#data">Data</a> ·
+  <a href="#method">Methodology</a> ·
+  <a href="#results">Results</a> ·
+  <a href="#limits">Limitations</a> ·
+  <a href="#recs">Ranked Recommendations</a> ·
+  <a href="#repro">Reproducibility</a> ·
+  <a href="#ack">Acknowledgments</a>
+</nav>
+
+<h2 id="abstract">Abstract</h2>
+<div class="abstract">
+<p>Content teams cannot manually review hundreds of thousands of pages each month, so which pages
+most need attention, and what should be done about each one? We label pages as growing,
+declining, recovering, or stable using three sequential 30-day click windows (Old → Baseline →
+Current), then train a RandomForest classifier on features computed strictly before the Current
+window to avoid leakage. On a held-out, page-grouped split, the model reaches a macro F1 of 0.323
+against 0.178 for a majority-class baseline — nearly double, though still far from reliable on
+every class individually. The resulting ranked action engine assigns a protect / rewrite / monitor
+/ review recommendation and a plain-language reason code to all 51,555 scored pages, flagging
+14,878 for rewrite and 14,829 for protection as the highest-priority review queues.</p>
+</div>
+
+<h2 id="intro">Introduction / Problem Statement</h2>
+<p>Most content teams sit on far more published pages than they can realistically re-review on a
+regular cadence. Traffic to any given page drifts for reasons that are rarely obvious from a
+dashboard alone — seasonal interest, a competitor publishing something stronger, a page simply
+aging past its usefulness, or a genuine recovery after an earlier dip. Without a systematic way to
+surface which pages are moving and in which direction, review time tends to go to whichever page
+someone happened to notice, not necessarily the page that needs it most.</p>
+<p>This project treats that triage problem as a classification task: given a page's own click
+history, can we predict whether it is currently growing, declining, recovering, or stable, and
+turn that prediction into a concrete recommended action? The goal is not to explain <em>why</em>
+a page's ranking changed in any search engine, and the model never claims to. It is narrower and
+more actionable: which pages, on the evidence of their own click trend alone, are worth a human's
+attention first — and what is the simplest plausible reason to point to when they look.</p>
+<p>The decision this supports is a prioritization decision, not a publishing decision. A content
+lead reading the ranked output should be able to answer, in under a minute, "what are the pages I
+should look at this week, and why," rather than opening every analytics dashboard page one at a time.</p>
+
+<h2 id="data">Data</h2>
+<h3>Source</h3>
+<p>All data comes from the FlyRank ML Internship warehouse, a gated release hosted on Hugging Face,
+read via DuckDB directly over the <code>hf://</code> path with a read-only access token. Page and
+client identifiers in the warehouse (<code>content_hash_id</code>, <code>client_hash_id</code>)
+are already pseudonymized in the release itself.</p>
+<h3>Table, columns, and date window</h3>
+<table>
+  <tr><th>Field</th><th>Value</th></tr>
+  <tr><td>Table</td><td><code>fact_content_daily_performance</code></td></tr>
+  <tr><td>Metric used</td><td>Google Search Console clicks (<code>gsc_clicks</code>)</td></tr>
+  <tr><td>Full warehouse date range</td><td>2025-01-27 to 2026-06-30</td></tr>
+  <tr><td>Old window</td><td>2026-04-01 to 2026-05-01</td></tr>
+  <tr><td>Baseline window</td><td>2026-05-01 to 2026-05-31</td></tr>
+  <tr><td>Current window</td><td>2026-05-31 to 2026-06-30</td></tr>
+  <tr><td>Distinct pages in warehouse</td><td>427,292</td></tr>
+  <tr><td>Pages retained after exclusions</td><td>51,555</td></tr>
+</table>
+<h3>Exclusions</h3>
+<p>Pages with zero recorded clicks in either the Old or Baseline window are dropped before
+labeling, since a percent-change calculation against a zero denominator is undefined rather than
+simply small. This narrowed 427,292 pages down to 51,555 — the large drop reflects how many pages
+in the full warehouse have little or no click activity in a given 30-day window, not a labeling error.</p>
+<blockquote>No client names, domains, URLs, private queries, credentials, or raw exports appear
+anywhere in this document, the notebook, or the repository. Page and client identifiers shown
+throughout are the warehouse's own pseudonymized hashes.</blockquote>
+
+<h2 id="method">Methodology</h2>
+<h3>Label definition</h3>
+<p>Every retained page is assigned to exactly one of four buckets based on click behavior across
+the three sequential windows:</p>
+<table>
+  <tr><th>Label</th><th>Rule</th><th>Share of pages</th></tr>
+  <tr><td><strong>Declining</strong></td><td>Current vs. Baseline clicks down more than 20%</td><td>55.3%</td></tr>
+  <tr><td><strong>Growing</strong></td><td>Current vs. Baseline clicks up more than 20%</td><td>25.1%</td></tr>
+  <tr><td><strong>Stable / worth review</strong></td><td>Everything else — small moves either way</td><td>18.2%</td></tr>
+  <tr><td><strong>Recovering</strong></td><td>Old→Baseline was declining, but Baseline→Current has turned upward</td><td>1.5%</td></tr>
+</table>
+<p>The class split is heavily imbalanced, with declining pages making up more than half the
+dataset and recovering pages under 2% — a limitation carried through to the Results section below.</p>
+<h3>Features</h3>
+<p>Every feature is computed using only Old- and Baseline-window data, never Current-window data —
+the project's core leakage guard, since the label itself is derived from the Current window. The
+feature set used: the ratio of Baseline to Old clicks (<code>click_trend_ratio</code>), raw Old
+and Baseline click counts, average impressions and average search position prior to the Current
+window, and pre-Current click-through rate.</p>
+<h3>Baseline model</h3>
+<p>A majority-class predictor — always guess "declining," the most common label in the training
+set — serves as the baseline that the model must beat.</p>
+<h3>Validation design</h3>
+<p>Rows are split with a grouped shuffle split (80/20), grouped by <code>content_hash_id</code>,
+rather than a plain random split. This matters because a random row-level split can let the same
+page appear in both train and test, inflating the apparent accuracy. Grouping by page keeps every
+row for a given page entirely on one side of the split.</p>
+
+<h2 id="results">Results</h2>
+<p>Baseline and model are evaluated on the identical held-out split of 10,311 pages, reported as
+macro F1 so that performance on smaller classes (like <em>recovering</em>, at 143 test pages)
+isn't masked by the largest class.</p>
+
+<img src="baseline_vs_model_f1.png" alt="Bar chart comparing baseline macro F1 of 0.178 to model macro F1 of 0.323">
+<p class="figure-caption">Figure 1. Model macro F1 (0.323) nearly doubles the majority-class baseline (0.178) on the identical held-out split.</p>
+
+<table>
+  <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr>
+  <tr><td>Declining</td><td>0.68</td><td>0.36</td><td>0.47</td><td>5,718</td></tr>
+  <tr><td>Growing</td><td>0.40</td><td>0.46</td><td>0.43</td><td>2,587</td></tr>
+  <tr><td>Recovering</td><td>0.07</td><td>0.96</td><td>0.14</td><td>143</td></tr>
+  <tr><td>Stable / worth review</td><td>0.22</td><td>0.30</td><td>0.26</td><td>1,863</td></tr>
+  <tr><td><strong>Accuracy</strong></td><td colspan="3"></td><td><strong>0.38</strong></td><td>10,311</td></tr>
+  <tr><td><strong>Macro avg</strong></td><td>0.35</td><td>0.52</td><td>0.32</td><td>10,311</td></tr>
+</table>
+
+<img src="confusion_matrix.png" alt="Confusion matrix of predicted vs actual labels on the held-out split">
+<p class="figure-caption">Figure 2. The model's single biggest failure mode: declining pages are predicted correctly only 36% of the time, with large numbers misclassified as growing or stable.</p>
+
+<img src="feature_importance.png" alt="Horizontal bar chart of feature importances, led by click trend ratio">
+<p class="figure-caption">Figure 3. <code>click_trend_ratio</code> dominates the model's decisions, followed by the raw Old and Baseline click counts — the pre-Current CTR and position features contribute comparatively little.</p>
+
+<p>The model clearly beats the baseline on overall macro F1, but the class-level picture is mixed.
+Recovering pages are caught almost every time (96% recall) but at very low precision (7%) — the
+model over-predicts "recovering" far more often than it's actually true, likely because the class
+has only 143 test examples to learn from. Declining pages, the largest and most consequential
+class, are caught only 36% of the time despite 68% precision when the model does call them —
+meaning many genuinely declining pages are still missed and would need a secondary, simpler rule
+(e.g. the raw click-trend-ratio threshold on its own) as a complementary check before relying on
+the model alone.</p>
+
+<h2 id="limits">Limitations &amp; Honest Framing</h2>
+<ul>
+  <li>Labels describe <em>observed</em> click-trend buckets over a fixed 30-day window choice, not
+  verified editorial quality or user intent — a different window length could relabel borderline pages.</li>
+  <li>The class distribution is heavily imbalanced (55% declining vs. 1.5% recovering), which is
+  the likely driver of the recovering class's very low precision despite high recall.</li>
+  <li>Declining-page recall (36%) is low enough that this model should supplement, not replace, a
+  simpler trend-ratio rule when the goal is to catch every declining page.</li>
+  <li>Output is decision-support, not an automated action: a human should review before rewriting,
+  merging, or pruning anything.</li>
+  <li>Results describe association between past and recent click behavior, not a causal claim
+  about any search engine's ranking algorithm or a guarantee that a recommended action will move clicks.</li>
+  <li>The grouped split controls for one leakage path (page identity) but cannot rule out broader
+  temporal effects (e.g. a site-wide event) affecting many pages' labels at once.</li>
+</ul>
+
+<h2 id="recs">Ranked Recommendations</h2>
+<p>Each predicted label maps to a concrete next action, applied across all 51,555 scored pages:</p>
+<table>
+  <tr><th>Recommended action</th><th>Pages</th><th>Maps from label</th></tr>
+  <tr><td>Rewrite</td><td>14,878</td><td>Declining</td></tr>
+  <tr><td>Protect</td><td>14,829</td><td>Growing</td></tr>
+  <tr><td>Review</td><td>12,398</td><td>Stable / worth review</td></tr>
+  <tr><td>Monitor</td><td>9,450</td><td>Recovering</td></tr>
+</table>
+<p>Example reason codes attached to the highest-confidence "rewrite" calls (confidence ≈ 0.97)
+combine two signals most often: a falling <code>click_trend_ratio</code> ("clicks trending down
+vs. older window") together with a low pre-Current click-through rate ("low CTR relative to
+visibility"). Pages flagged with no strong signal default to "review" rather than a more drastic
+action, consistent with the decision-support framing above.</p>
+
+<h2 id="repro">Reproducibility</h2>
+<ul>
+  <li>Notebook: <code>work/notebooks/capstone.ipynb</code> — runs end to end given a Hugging Face read token.</li>
+  <li>Repo: <a href="https://github.com/Sameer-159/FlyRank" target="_blank" rel="noopener">github.com/Sameer-159/FlyRank</a></li>
+  <li>Outputs produced by the notebook: <code>features.parquet</code>, <code>ranked_action_engine.csv</code>,
+  and the three charts embedded above (also saved in this <code>docs/</code> folder).</li>
+</ul>
+
+<h2 id="ack">Acknowledgments &amp; Data Credit</h2>
+<p>Built on the <a href="https://flyrank.ai" target="_blank" rel="noopener">FlyRank ML Internship dataset</a>.</p>
+
+<footer>Deployed via GitHub Pages · Sameer, NUTECH AI-23</footer>
+
+</body>
+</html>
